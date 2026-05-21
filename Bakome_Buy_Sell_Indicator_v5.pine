@@ -1,0 +1,306 @@
+//@version=5
+indicator('Bakome buy sell mejor ', overlay=true)
+
+// ============================================
+// CONFIGURABLE PARAMETERS
+// ============================================
+emaFastLen = input.int(5, 'Fast EMA', minval=1)
+emaSlowLen = input.int(13, 'Slow EMA', minval=1)
+atrLen = input.int(14, 'ATR Period', minval=1)
+atrMultSL = input.float(0.5, 'SL Multiplier (ATR)', minval=0.1, step=0.1)
+riskReward = input.float(3.0, 'Risk:Reward (R:R)', minval=1.0, step=0.5)
+confirmCandle = input.bool(true, 'Require candle confirmation')
+
+// EMA Settings
+showEmaFastLabel = input.bool(true, 'Show Fast EMA', group='EMAs')
+emaFastColor = input.color(color.green, 'Fast EMA Color', group='EMAs')
+showEmaSlowLabel = input.bool(true, 'Show Slow EMA', group='EMAs')
+emaSlowColor = input.color(color.orange, 'Slow EMA Color', group='EMAs')
+
+// ============================================
+// EMA AND ATR CALCULATIONS
+// ============================================
+emaFast = ta.ema(close, emaFastLen)
+emaSlow = ta.ema(close, emaSlowLen)
+atr = ta.atr(atrLen)
+
+// ============================================
+// TREND LOGIC
+// ============================================
+bullTrend = emaFast > emaSlow
+bearTrend = emaFast < emaSlow
+trendChange = bullTrend != bullTrend[1]
+
+// ============================================
+// ENTRY SIGNALS
+// ============================================
+buyCondition1 = bullTrend and trendChange and close > open
+sellCondition1 = bearTrend and trendChange and close < open
+buyCondition2 = bullTrend and trendChange
+sellCondition2 = bearTrend and trendChange
+
+buySignal = confirmCandle ? buyCondition1 : buyCondition2
+sellSignal = confirmCandle ? sellCondition1 : sellCondition2
+
+// ============================================
+// POSITION MANAGEMENT
+// ============================================
+var float entryPrice = na
+var float stopLoss = na
+var float takeProfitFinal = na
+var bool inPosition = false
+var string positionType = ''
+
+// Arrays for intermediate TPs
+var float[] tpLevels = array.new_float(0)
+var bool[] tpHitFlags = array.new_bool(0)
+
+// ============================================
+// CLOSING POSITIONS
+// ============================================
+tpFinalHit = false
+slHit = false
+invalidated = false
+
+// Check TP/SL in active position
+if inPosition and positionType == 'LONG'
+    if high >= takeProfitFinal
+        tpFinalHit := true
+        inPosition := false
+        positionType := ''
+    else if low <= stopLoss
+        slHit := true
+        inPosition := false
+        positionType := ''
+
+if inPosition and positionType == 'SHORT'
+    if low <= takeProfitFinal
+        tpFinalHit := true
+        inPosition := false
+        positionType := ''
+    else if high >= stopLoss
+        slHit := true
+        inPosition := false
+        positionType := ''
+
+// Check intermediate TPs (mark only once)
+if inPosition and array.size(tpLevels) > 0
+    for i = 0 to array.size(tpLevels) - 1
+        if not array.get(tpHitFlags, i)
+            if positionType == 'LONG' and high >= array.get(tpLevels, i)
+                array.set(tpHitFlags, i, true)
+            else if positionType == 'SHORT' and low <= array.get(tpLevels, i)
+                array.set(tpHitFlags, i, true)
+
+// ============================================
+// INVALIDATION AND NEW ENTRIES
+// ============================================
+// Variables to show signals
+showBuySignal = false
+showSellSignal = false
+var string invalidatedType = ''
+
+if buySignal
+    // Only process if NO active LONG position
+    if not inPosition or positionType != 'LONG'
+        // Mark invalidation if there was a SHORT
+        if inPosition and positionType == 'SHORT'
+            invalidated := true
+            invalidatedType := 'SELL'
+            inPosition := false
+        
+        // New LONG entry
+        entryPrice := close
+        stopLoss := low - atr * atrMultSL
+        risk = entryPrice - stopLoss
+        takeProfitFinal := entryPrice + risk * riskReward
+        
+        // Create intermediate TPs
+        array.clear(tpLevels)
+        array.clear(tpHitFlags)
+        numTPs = math.floor(riskReward)
+        for i = 1 to numTPs - 1
+            array.push(tpLevels, entryPrice + risk * i)
+            array.push(tpHitFlags, false)
+        
+        inPosition := true
+        positionType := 'LONG'
+        showBuySignal := true
+
+if sellSignal
+    // Only process if NO active SHORT position
+    if not inPosition or positionType != 'SHORT'
+        // Mark invalidation if there was a LONG
+        if inPosition and positionType == 'LONG'
+            invalidated := true
+            invalidatedType := 'BUY'
+            inPosition := false
+        
+        // New SHORT entry
+        entryPrice := close
+        stopLoss := high + atr * atrMultSL
+        risk = stopLoss - entryPrice
+        takeProfitFinal := entryPrice - risk * riskReward
+        
+        // Create intermediate TPs
+        array.clear(tpLevels)
+        array.clear(tpHitFlags)
+        numTPs = math.floor(riskReward)
+        for i = 1 to numTPs - 1
+            array.push(tpLevels, entryPrice - risk * i)
+            array.push(tpHitFlags, false)
+        
+        inPosition := true
+        positionType := 'SHORT'
+        showSellSignal := true
+
+// ============================================
+// VISUALIZATION
+// ============================================
+// EMAs
+plot(emaFast, title='Fast EMA', color=color.new(emaFastColor, 0), linewidth=1, 
+     display=showEmaFastLabel ? display.all : display.none)
+plot(emaSlow, title='Slow EMA', color=color.new(emaSlowColor, 0), linewidth=1, 
+     display=showEmaSlowLabel ? display.all : display.none)
+
+// Entry Signals - KEY CHANGE: use showBuySignal and showSellSignal
+plotshape(showBuySignal, 'BUY Signal', shape.labelup, location.belowbar, 
+     color.new(color.lime, 0), text='BUY', textcolor=color.white, size=size.small)
+plotshape(showSellSignal, 'SELL Signal', shape.labeldown, location.abovebar, 
+     color.new(color.red, 0), text='SELL', textcolor=color.white, size=size.small)
+
+// Final TP and SL
+plotshape(tpFinalHit, 'FINAL TAKE PROFIT', shape.circle, location.abovebar, 
+     color.new(#00ff00, 0), text='🎯 TP', 
+     textcolor=#00ff00, size=size.small)
+
+plotshape(slHit, 'STOP LOSS', shape.xcross, location.belowbar, 
+     color.new(#ff0000, 0), text='SL', textcolor=color.white, size=size.small)
+
+// Separate invalidation signals
+plotshape(invalidated and invalidatedType == 'BUY', 'INVALIDATED BUY', shape.diamond, location.abovebar, 
+     color.new(color.yellow, 0), text='INV BUY', textcolor=color.rgb(97, 100, 107), size=size.tiny)
+plotshape(invalidated and invalidatedType == 'SELL', 'INVALIDATED SELL', shape.diamond, location.abovebar, 
+     color.new(color.yellow, 0), text='INV SELL', textcolor=color.rgb(97, 100, 107), size=size.tiny)
+
+// Intermediate TPs (mark only the first time reached)
+var bool[] tpAlreadyMarked = array.new_bool(0)
+
+// Initialize marker array when there is a new position
+if showBuySignal or showSellSignal
+    array.clear(tpAlreadyMarked)
+    numTPs = math.floor(riskReward)
+    for i = 1 to numTPs - 1
+        array.push(tpAlreadyMarked, false)
+
+// Show labels only once per TP
+if inPosition and array.size(tpHitFlags) > 0 and array.size(tpAlreadyMarked) > 0
+    for i = 0 to array.size(tpHitFlags) - 1
+        // If TP is hit AND has not been marked before
+        if array.get(tpHitFlags, i) and not array.get(tpAlreadyMarked, i)
+            label.new(bar_index, high, 
+                 'TP' + str.tostring(i + 1), 
+                 style=label.style_label_down, 
+                 color=color.new(color.green, 50), 
+                 textcolor=color.white, 
+                 size=size.tiny,
+                 yloc=yloc.abovebar)
+            array.set(tpAlreadyMarked, i, true)
+
+// Risk management lines
+var line entryLine = na
+var line slLine = na
+var line tpLineFinal = na
+var line[] tpIntermediateLines = array.new_line(0)
+
+if inPosition and positionType != ''
+    // Entry
+    if na(entryLine)
+        entryLine := line.new(bar_index - 10, entryPrice, bar_index + 10, entryPrice, 
+             color=color.new(color.white, 0), width=1, style=line.style_dashed)
+    else
+        line.set_xy1(entryLine, bar_index - 10, entryPrice)
+        line.set_xy2(entryLine, bar_index + 10, entryPrice)
+    
+    // Stop Loss
+    if na(slLine)
+        slLine := line.new(bar_index, stopLoss, bar_index + 1, stopLoss, 
+             color=color.new(color.red, 0), width=2)
+    else
+        line.set_xy1(slLine, bar_index, stopLoss)
+        line.set_xy2(slLine, bar_index + 1, stopLoss)
+    
+    // Final Take Profit
+    if na(tpLineFinal)
+        tpLineFinal := line.new(bar_index, takeProfitFinal, bar_index + 1, takeProfitFinal, 
+             color=color.new(color.green, 0), width=2)
+    else
+        line.set_xy1(tpLineFinal, bar_index, takeProfitFinal)
+        line.set_xy2(tpLineFinal, bar_index + 1, takeProfitFinal)
+    
+    // Intermediate TPs (soft green lines)
+    if array.size(tpIntermediateLines) == 0 and array.size(tpLevels) > 0
+        for i = 0 to array.size(tpLevels) - 1
+            tpLine = line.new(bar_index, array.get(tpLevels, i), bar_index + 1, 
+                 array.get(tpLevels, i), color=color.new(color.green, 60), 
+                 width=1, style=line.style_dotted)
+            array.push(tpIntermediateLines, tpLine)
+    else if array.size(tpIntermediateLines) > 0
+        for i = 0 to array.size(tpIntermediateLines) - 1
+            line.set_xy1(array.get(tpIntermediateLines, i), bar_index, array.get(tpLevels, i))
+            line.set_xy2(array.get(tpIntermediateLines, i), bar_index + 1, array.get(tpLevels, i))
+else
+    if not na(entryLine)
+        line.delete(entryLine)
+        entryLine := na
+    if not na(slLine)
+        line.delete(slLine)
+        slLine := na
+    if not na(tpLineFinal)
+        line.delete(tpLineFinal)
+        tpLineFinal := na
+    if array.size(tpIntermediateLines) > 0
+        for i = 0 to array.size(tpIntermediateLines) - 1
+            line.delete(array.get(tpIntermediateLines, i))
+        array.clear(tpIntermediateLines)
+
+// ============================================
+// INFO TABLE
+// ============================================
+var table infoTable = table.new(position.top_right, 2, 5, 
+     bgcolor=color.new(color.black, 85), border_width=1)
+
+if barstate.islast
+    table.cell(infoTable, 0, 0, 'Status:', text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 0, inPosition ? positionType : 'No Position', 
+          text_color=inPosition ? color.yellow : color.gray, text_size=size.small)
+    
+    if inPosition
+        table.cell(infoTable, 0, 1, 'Entry:', text_color=color.white, text_size=size.small)
+        table.cell(infoTable, 1, 1, str.tostring(entryPrice, '#.##'), 
+             text_color=color.white, text_size=size.small)
+        
+        table.cell(infoTable, 0, 2, 'Stop Loss:', text_color=color.white, text_size=size.small)
+        table.cell(infoTable, 1, 2, str.tostring(stopLoss, '#.##'), 
+             text_color=color.red, text_size=size.small)
+        
+        table.cell(infoTable, 0, 3, 'Take Profit:', text_color=color.white, text_size=size.small)
+        table.cell(infoTable, 1, 3, str.tostring(takeProfitFinal, '#.##'), 
+             text_color=color.green, text_size=size.small)
+        
+        riskVal = math.abs(entryPrice - stopLoss)
+        rewardVal = math.abs(takeProfitFinal - entryPrice)
+        currentRR = rewardVal / riskVal
+        
+        table.cell(infoTable, 0, 4, 'R:R:', text_color=color.white, text_size=size.small)
+        table.cell(infoTable, 1, 4, str.tostring(currentRR, '#.##') + ':1', 
+             text_color=color.orange, text_size=size.small)
+
+// ============================================
+// ALERTS
+// ============================================
+alertcondition(showBuySignal, '🟢 BUY Signal', '📈 BUY on {{ticker}} | Price: {{close}}')
+alertcondition(showSellSignal, '🔴 SELL Signal', '📉 SELL on {{ticker}} | Price: {{close}}')
+alertcondition(tpFinalHit, '🎯 Final Take Profit', '✅ Final TP hit on {{ticker}} | Price: {{close}}')
+alertcondition(slHit, '❌ Stop Loss', '🛑 SL triggered on {{ticker}} | Price: {{close}}')
+alertcondition(invalidated, '⚠️ Entry Invalidated', '⚠️ Previous entry invalidated on {{ticker}} | New signal detected')
